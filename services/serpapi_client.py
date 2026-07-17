@@ -255,7 +255,15 @@ def search_places(lat: float, lng: float, query: str, hl: str = "vi") -> list[di
                 resp = client.get(BASE_URL, params=params)
                 if resp.status_code == 200:
                     data = resp.json()
-                    results = (data.get("local_results") or data.get("place_results") or [])
+                    results = data.get("local_results")
+                    if not results:
+                        place_results = data.get("place_results")
+                        if isinstance(place_results, dict):
+                            results = [place_results]
+                        elif isinstance(place_results, list):
+                            results = place_results
+                        else:
+                            results = []
                     if results:
                         _set_cache(key, results)
                         return results

@@ -4,7 +4,7 @@ import re
 import unicodedata
 import httpx
 from dotenv import load_dotenv
-from math import radians, sin, cos, sqrt, atan2
+from math import radians, sin, cos, sqrt, atan2, log10
 
 load_dotenv()
 
@@ -277,6 +277,115 @@ def search_places_bilingual(lat: float, lng: float, vi_query: str, en_query: str
     if not results:
         results = search_places(lat, lng, en_query, hl="en")
     return results
+
+
+def search_top_sights(destination: str) -> list[dict]:
+    """Lấy khối 'top_sights' của Google Search — danh sách điểm nổi bật do Google
+    tuyển chọn, chất lượng hơn hẳn search text trên Maps."""
+    key = _cache_key("topsights", destination.lower().strip())
+    cached = _get_cache(key)
+    if cached:
+        return cached
+
+    params = {
+        "api_key": SERPAPI_API_KEY,
+        "engine": "google",
+        "q": f"things to do in {destination}",
+        "hl": "vi",
+        "gl": "vn",
+    }
+    try:
+        with httpx.Client(timeout=30) as client:
+            resp = client.get(BASE_URL, params=params)
+            if resp.status_code == 200:
+                data = resp.json()
+                sights = data.get("top_sights", {}).get("sights", [])
+                results = [
+                    {
+                        "title": s.get("title", ""),
+                        "rating": s.get("rating") or 0,
+                        "reviews": s.get("reviews") or 0,
+                        "description": s.get("description", ""),
+                        "price": s.get("price") or "Miễn phí",
+                        # top_sights không trả địa chỉ — dùng tên điểm đến để link Maps vẫn đúng
+                        "address": destination,
+                        "type": "Thắng cảnh",
+                    }
+                    for s in sights
+                    if s.get("title")
+                ]
+                if results:
+                    _set_cache(key, results)
+                    return results
+    except Exception:
+        pass
+    return []
+
+
+_JUNK_PLACE_KEYWORDS = (
+    "travel agency", "tour operator", "tour agency", "travel agent",
+    "tourist information", "công ty du lịch", "đại lý du lịch",
+    "văn phòng tour", "đại lý vé",
+)
+
+
+def _is_junk_place(place: dict) -> bool:
+    t = place.get("type", "")
+    if isinstance(t, list):
+        t = " ".join(str(x) for x in t)
+    text = (str(t) + " " + place.get("title", "")).lower()
+    return any(kw in text for kw in _JUNK_PLACE_KEYWORDS)
+
+
+def rank_places(places: list[dict]) -> list[dict]:
+    """Loại kết quả rác (công ty tour...) rồi xếp theo rating × log10(số review) —
+    nhiều review là tín hiệu 'hot' đáng tin hơn rating đơn thuần."""
+    def score(p: dict) -> float:
+        try:
+            rating = float(p.get("rating") or 0)
+        except (TypeError, ValueError):
+            rating = 0.0
+        try:
+            reviews = int(p.get("reviews") or 0)
+        except (TypeError, ValueError):
+            reviews = 0
+        return rating * log10(reviews + 1)
+
+    kept = [p for p in places if not _is_junk_place(p)]
+    if not kept:
+        kept = places
+    return _dedupe_places(sorted(kept, key=score, reverse=True))
+
+
+def _norm_title(title: str) -> str:
+    return _strip_accents(title.lower().strip())
+
+
+def _is_dup_title(a: str, b: str) -> bool:
+    """Trùng khi tên giống hệt hoặc tên này chứa tên kia
+    (VD: 'Ba Na Hills' vs 'Sun World Bà Nà Hills')."""
+    if a == b:
+        return True
+    return (len(a) > 6 and a in b) or (len(b) > 6 and b in a)
+
+
+def _dedupe_places(places: list[dict]) -> list[dict]:
+    seen: list[str] = []
+    result = []
+    for p in places:
+        t = _norm_title(p.get("title", ""))
+        if not t:
+            continue
+        if any(_is_dup_title(t, s) for s in seen):
+            continue
+        seen.append(t)
+        result.append(p)
+    return result
+
+
+def merge_places(primary: list[dict], secondary: list[dict]) -> list[dict]:
+    """Gộp 2 danh sách địa điểm, bỏ trùng (không dấu, bắt cả tên chứa nhau)."""
+    return _dedupe_places(primary + secondary)
 
 
 def estimate_flight_cost(dep_lat: float, dep_lng: float, dest_lat: float, dest_lng: float) -> list[dict]:

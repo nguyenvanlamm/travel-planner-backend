@@ -6,7 +6,8 @@ from typing import Optional
 from datetime import datetime, timedelta
 from services.serpapi_client import (
     geocode, search_flights, search_hotels, search_places,
-    search_places_bilingual, estimate_flight_cost, SERPAPI_API_KEY
+    search_places_bilingual, search_top_sights, rank_places, merge_places,
+    estimate_flight_cost, SERPAPI_API_KEY
 )
 
 PACE_MULTIPLIER = {
@@ -276,14 +277,21 @@ def generate_plan(input_data: TravelInput) -> TravelPlan:
     attractions_raw = []
     restaurants_raw = []
     if dest_geo and SERPAPI_API_KEY and SERPAPI_API_KEY != "thay_bang_api_key_cua_ban":
+        # Nguồn chính: top_sights do Google tuyển chọn; chỉ gọi thêm Maps khi còn thiếu
         try:
-            attractions_raw = search_places_bilingual(
-                dest_geo["lat"], dest_geo["lng"],
-                f"địa điểm du lịch tại {input_data.destination}",
-                f"top tourist attractions in {input_data.destination}"
-            )
+            attractions_raw = search_top_sights(input_data.destination)
         except Exception:
             pass
+        if len(attractions_raw) < 8:
+            try:
+                maps_attractions = search_places_bilingual(
+                    dest_geo["lat"], dest_geo["lng"],
+                    f"địa điểm du lịch tại {input_data.destination}",
+                    f"top tourist attractions in {input_data.destination}"
+                )
+                attractions_raw = merge_places(attractions_raw, maps_attractions)
+            except Exception:
+                pass
         try:
             restaurants_raw = search_places_bilingual(
                 dest_geo["lat"], dest_geo["lng"],
@@ -293,25 +301,27 @@ def generate_plan(input_data: TravelInput) -> TravelPlan:
         except Exception:
             pass
 
+    # Fallback khi API không khả dụng: gợi ý chung, KHÔNG gắn rating giả
     dest = input_data.destination
+    fallback_note = "Gợi ý chung — chưa có dữ liệu thực tế, hãy kiểm tra lại trước khi đi"
     if not attractions_raw:
         attractions_raw = [
-            {"title": f"Chợ Trung tâm {dest}", "rating": 4.0, "type": "Mua sắm", "address": f"Trung tâm {dest}"},
-            {"title": f"Quảng trường {dest}", "rating": 4.2, "type": "Thắng cảnh", "address": f"Trung tâm {dest}"},
-            {"title": f"Khu phố đi bộ {dest}", "rating": 4.1, "type": "Văn hóa", "address": f"Trung tâm {dest}"},
-            {"title": f"Công viên trung tâm {dest}", "rating": 3.9, "type": "Thiên nhiên", "address": f"{dest}"},
-            {"title": f"Bảo tàng {dest}", "rating": 4.3, "type": "Văn hóa", "address": f"Trung tâm {dest}"},
-            {"title": f"Chùa {dest}", "rating": 4.0, "type": "Văn hóa", "address": f"{dest}"},
+            {"title": f"Chợ Trung tâm {dest}", "type": "Mua sắm", "address": f"Trung tâm {dest}", "description": fallback_note},
+            {"title": f"Quảng trường {dest}", "type": "Thắng cảnh", "address": f"Trung tâm {dest}", "description": fallback_note},
+            {"title": f"Khu phố đi bộ {dest}", "type": "Văn hóa", "address": f"Trung tâm {dest}", "description": fallback_note},
+            {"title": f"Công viên trung tâm {dest}", "type": "Thiên nhiên", "address": f"{dest}", "description": fallback_note},
+            {"title": f"Bảo tàng {dest}", "type": "Văn hóa", "address": f"Trung tâm {dest}", "description": fallback_note},
+            {"title": f"Chùa {dest}", "type": "Văn hóa", "address": f"{dest}", "description": fallback_note},
         ]
 
     if not restaurants_raw:
         restaurants_raw = [
-            {"title": f"Phở {dest}", "rating": 4.3, "price": "$", "type": "Quán ăn", "address": f"Trung tâm {dest}"},
-            {"title": f"Bún bò {dest}", "rating": 4.2, "price": "$", "type": "Quán ăn", "address": f"Trung tâm {dest}"},
-            {"title": f"Nhà hàng Hải sản {dest}", "rating": 4.5, "price": "$$$", "type": "Nhà hàng", "address": f"{dest}"},
-            {"title": f"Cafe {dest}", "rating": 4.0, "price": "$", "type": "Cafe", "address": f"Trung tâm {dest}"},
-            {"title": f"Quán ăn vặt {dest}", "rating": 4.1, "price": "$", "type": "Quán ăn", "address": f"Chợ {dest}"},
-            {"title": f"Nhà hàng Đặc sản {dest}", "rating": 4.4, "price": "$$", "type": "Nhà hàng", "address": f"{dest}"},
+            {"title": f"Phở {dest}", "rating": 0, "price": "$", "type": "Quán ăn", "address": f"Trung tâm {dest}"},
+            {"title": f"Bún bò {dest}", "rating": 0, "price": "$", "type": "Quán ăn", "address": f"Trung tâm {dest}"},
+            {"title": f"Nhà hàng Hải sản {dest}", "rating": 0, "price": "$$$", "type": "Nhà hàng", "address": f"{dest}"},
+            {"title": f"Cafe {dest}", "rating": 0, "price": "$", "type": "Cafe", "address": f"Trung tâm {dest}"},
+            {"title": f"Quán ăn vặt {dest}", "rating": 0, "price": "$", "type": "Quán ăn", "address": f"Chợ {dest}"},
+            {"title": f"Nhà hàng Đặc sản {dest}", "rating": 0, "price": "$$", "type": "Nhà hàng", "address": f"{dest}"},
         ]
 
     if input_data.interests:
@@ -319,6 +329,10 @@ def generate_plan(input_data: TravelInput) -> TravelPlan:
 
     if input_data.cuisine:
         restaurants_raw = _filter_restaurants(restaurants_raw, input_data.cuisine)
+
+    # Xếp theo độ hot (rating × log số review) và loại kết quả rác
+    attractions_raw = rank_places(attractions_raw)
+    restaurants_raw = rank_places(restaurants_raw)
 
     transport_items = _map_transport_items(transport)
     hotel_items = _map_hotel_items(hotels)

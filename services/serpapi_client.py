@@ -40,6 +40,7 @@ def _haversine(lat1, lon1, lat2, lon2):
 
 
 def _strip_accents(s: str) -> str:
+    s = s.replace("Đ", "D").replace("đ", "d")
     nfkd = unicodedata.normalize("NFKD", s)
     return "".join(c for c in nfkd if not unicodedata.combining(c))
 
@@ -72,9 +73,10 @@ def geocode(location: str) -> dict | None:
     if lower in _CITY_ALIASES:
         normalized = _CITY_ALIASES[lower]
 
-    queries = [normalized, _strip_accents(normalized)]
-    if normalized == location:
-        queries.append(_strip_accents(location))
+    stripped = _strip_accents(normalized)
+    # locations.json của SerpAPI khá khắt khe với tên ("Dalat" được, "Da Lat" không)
+    # nên thử thêm biến thể bỏ dấu cách
+    queries = [normalized, stripped, stripped.replace(" ", "")]
     seen = set()
     try:
         with httpx.Client(timeout=10) as client:
@@ -82,7 +84,7 @@ def geocode(location: str) -> dict | None:
                 if not q or q in seen:
                     continue
                 seen.add(q)
-                resp = client.get(LOCATION_URL, params={"q": q, "limit": 1})
+                resp = client.get(LOCATION_URL, params={"q": q, "limit": 1, "api_key": SERPAPI_API_KEY})
                 if resp.status_code == 200:
                     data = resp.json()
                     if data and len(data) > 0:
@@ -97,6 +99,33 @@ def geocode(location: str) -> dict | None:
                             }
                             _set_cache(key, result, ttl=86400)
                             return result
+    except Exception:
+        pass
+
+    # Fallback: Open-Meteo geocoding — miễn phí, không cần key, hiểu tên có dấu
+    result = _geocode_open_meteo(location)
+    if result:
+        _set_cache(key, result, ttl=86400)
+    return result
+
+
+def _geocode_open_meteo(location: str) -> dict | None:
+    try:
+        with httpx.Client(timeout=10) as client:
+            resp = client.get(
+                "https://geocoding-api.open-meteo.com/v1/search",
+                params={"name": location, "count": 1, "language": "vi"},
+            )
+            if resp.status_code == 200:
+                results = resp.json().get("results") or []
+                if results:
+                    r = results[0]
+                    return {
+                        "lat": float(r["latitude"]),
+                        "lng": float(r["longitude"]),
+                        "google_id": "",
+                        "name": r.get("name", location),
+                    }
     except Exception:
         pass
     return None
